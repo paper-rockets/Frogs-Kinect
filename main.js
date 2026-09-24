@@ -1,6 +1,7 @@
 import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.166.1/build/three.module.js';
 import { GLTFLoader } from 'https://cdn.jsdelivr.net/npm/three@0.166.1/examples/jsm/loaders/GLTFLoader.js';
 import { clone as cloneSkinned } from 'https://cdn.jsdelivr.net/npm/three@0.166.1/examples/jsm/utils/SkeletonUtils.js';
+import { createJungleAudio } from './audio.js';
 
 const canvas = document.querySelector('#scene');
 
@@ -13,6 +14,11 @@ let quality = forcedQuality === 'low' ? 'low' : 'high';
 // Earlier builds remembered "low" here; clear it so it can't stick.
 try { localStorage.removeItem('jungleWall.quality'); } catch { /* storage blocked */ }
 const pixelRatioFor = () => (quality === 'low' ? Math.min(window.devicePixelRatio, 1) * 0.85 : Math.min(window.devicePixelRatio, 1.5));
+// Sound: ?sound=off silences it, ?volume=0.5 turns it down (see audio.js).
+const soundParams = new URLSearchParams(location.search);
+const sound = createJungleAudio({
+  volume: soundParams.get('sound') === 'off' ? 0 : THREE.MathUtils.clamp(Number(soundParams.get('volume') ?? 1) || 0, 0, 1)
+});
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: quality === 'high', powerPreference: 'high-performance' });
 renderer.setPixelRatio(pixelRatioFor());
 renderer.setSize(window.innerWidth, window.innerHeight, false);
@@ -1010,7 +1016,7 @@ function setNormalisedInteraction(x, y, source = 'pointer') {
   presence.lastInput = clock.getElapsedTime();
   if (pondHit && presence.lastInput - pondState.lastRipple > 0.22) {
     pondState.lastRipple = presence.lastInput;
-    addRipple(pondHit.point, 1);
+    if (addRipple(pondHit.point, 1)) sound?.drip(screenPan(pondHit.point));
   }
   // Kinect bridge: call window.jungleWall.setInput({ x: 0..1, y: 0..1, source: 'kinect' }).
   void source;
@@ -1023,6 +1029,7 @@ function addRipple(worldPoint, strength = 1, reach = 1.35) {
   if ((local.x / POND.rx) ** 2 + (local.y / POND.rz) ** 2 > reach) return;
   const next = ripples.reduce((oldest, item) => item.z > oldest.z ? item : oldest, ripples[0]);
   next.set(local.x, local.y, 0, strength);
+  return true;
 }
 
 window.jungleWall = {
@@ -1524,7 +1531,7 @@ function updateFrogs(time, delta, active) {
         frog.offTerrain = frog.nextOffTerrain;
         if (frog.offTerrain) frog.cooldown = Math.max(frog.cooldown, 0.65);
         pos.copy(frog.home);
-        addRipple(frog.holder.getWorldPosition(scratchAway), 0.8, 2.6);
+        if (addRipple(frog.holder.getWorldPosition(scratchAway), 0.8, 2.6)) sound?.splash(screenPan(scratchAway), 0.8);
       }
     } else {
       pos.copy(frog.home);
@@ -1690,6 +1697,7 @@ function updateSurfaceFrog(time, delta, active) {
     else holder.quaternion.slerpQuaternions(flight, q, THREE.MathUtils.smoothstep(p, 0.6, 0.95));
     if (p === 1) {
       act.phase = 'stick';
+      sound?.splat(screenPan(holder.position));
       act.t = 0;
       settleToIdle(frog);
     }
@@ -1768,7 +1776,7 @@ function updateSurfaceFrog(time, delta, active) {
       frog.cooldown = 3;
       surfaceAct.frog = null;
       settleToIdle(frog);
-      addRipple(holder.getWorldPosition(a), 0.8, 2.6);
+      if (addRipple(holder.getWorldPosition(a), 0.8, 2.6)) sound?.splash(screenPan(a), 1);
     }
   }
 }
@@ -1792,6 +1800,7 @@ function updateWater(time, delta) {
     const reach = Math.sqrt(Math.random()) * 0.7;
     const next = ripples.reduce((oldest, item) => item.z > oldest.z ? item : oldest, ripples[0]);
     next.set(Math.cos(angle) * POND.rx * reach, Math.sin(angle) * POND.rz * reach, 0, 0.45);
+    sound?.drip(screenPan(pond.getWorldPosition(new THREE.Vector3())));
   }
 }
 
@@ -1820,6 +1829,35 @@ function watchFrameRate(time) {
   renderer.setSize(window.innerWidth, window.innerHeight, false);
 }
 
+// Left/right speaker balance for a point in the world: where it sits on screen.
+const panScratch = new THREE.Vector3();
+function screenPan(worldPoint) {
+  return THREE.MathUtils.clamp(panScratch.copy(worldPoint).project(camera).x, -1, 1) * 0.85;
+}
+
+// Frog calls: every few seconds a resting frog calls from its side of the screen, and
+// sometimes another answers. Frogs near a hand stay quiet, and while someone is there
+// the whole chorus hushes, returning slowly once they leave.
+const soundState = { nextCall: 4, calm: null };
+function updateSound(time, active) {
+  if (!sound) return;
+  const calm = active ? 0.15 : 1;
+  if (calm !== soundState.calm) {
+    soundState.calm = calm;
+    sound.setCalm(calm);
+  }
+  if (time < soundState.nextCall) return;
+  const hand = habitat.worldToLocal(interactionPoint.clone());
+  const callers = frogs.filter((frog) => !frog.onSurface && frog.hop === 0
+    && !(active && Math.hypot(frog.holder.position.x - hand.x, frog.holder.position.z - hand.z) < 3.5));
+  if (callers.length) {
+    const frog = callers[Math.floor(Math.random() * callers.length)];
+    sound.frogCall(screenPan(frog.holder.getWorldPosition(panScratch)), frog.keepGloss);
+  }
+  // A quick reply now and then, otherwise a pause.
+  soundState.nextCall = time + (Math.random() < 0.3 ? THREE.MathUtils.randFloat(0.3, 0.8) : THREE.MathUtils.randFloat(1.5, 5) * (active ? 2 : 1));
+}
+
 function render() {
   const delta = Math.min(clock.getDelta(), 0.05);
   const time = clock.getElapsedTime();
@@ -1833,6 +1871,7 @@ function render() {
   updateFrogs(time, delta, active);
   updateSurfaceFrog(time, delta, active);
   updateWater(time, delta);
+  updateSound(time, active);
   renderer.render(scene, camera);
   requestAnimationFrame(render);
 }

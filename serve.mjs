@@ -10,6 +10,7 @@ const mime = {
   '.css': 'text/css; charset=utf-8',
   '.glb': 'model/gltf-binary',
   '.png': 'image/png',
+  '.mp3': 'audio/mpeg',
   '.webmanifest': 'application/manifest+json'
 };
 
