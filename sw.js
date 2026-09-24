@@ -2,7 +2,7 @@
 //  - Page, code and styles: network first (edits show up straight away), cache as fallback.
 //  - 3D models, icons and the three.js library: cache first (big, rarely change).
 // Bump VERSION to drop everything cached by an older build.
-const VERSION = 'jungle-wall-v3';
+const VERSION = 'jungle-wall-v5';
 const SHELL = ['./', './index.html', './main.js', './audio.js', './style.css', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png'];
 
 // Everything main.js loads is read from main.js itself (models and three.js files), so

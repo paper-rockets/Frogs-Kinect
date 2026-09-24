@@ -237,6 +237,9 @@ pond.rotation.x = -Math.PI / 2;
 pond.position.set(POND.x, 0.015, POND.z);
 pond.renderOrder = 1;
 ground.add(pond);
+// Island, plants, rocks, mushrooms and pond: what the scenery toggle hides. The frogs
+// and butterflies are never in here.
+const scenery = [pond];
 const ripples = pondMaterial.uniforms.uRipples.value;
 const pondState = { lastRipple: -10, nextDrip: 3 };
 
@@ -252,6 +255,7 @@ function addRock(x, z, scale, tone = 0x72846d) {
   rock.castShadow = true;
   rock.receiveShadow = true;
   ground.add(rock);
+  scenery.push(rock);
 }
 
 function addMushroom(x, z, scale) {
@@ -266,6 +270,7 @@ function addMushroom(x, z, scale) {
   group.castShadow = true;
   group.traverse((part) => { part.castShadow = true; });
   ground.add(group);
+  scenery.push(group);
 }
 
 function createFrond(color = 0x2e6343, length = 2.7) {
@@ -457,6 +462,8 @@ function loadProp(file, position, height, rotation = 0, onReady) {
     prop.position.add(position);
     prop.rotation.y = rotation;
     habitat.add(prop);
+    scenery.push(prop);
+    prop.visible = sceneryShown;
     if (onReady) onReady(prop);
     preloadTracker.step();
   }, undefined, () => {
@@ -597,6 +604,8 @@ function loadPlantSet(file, placements, height) {
       plant.rotation.y = turn;
       plant.scale.multiplyScalar(size);
       ground.add(plant);
+      scenery.push(plant);
+      plant.visible = sceneryShown;
       makeVegetationReactive(plant);
     });
     preloadTracker.step();
@@ -709,6 +718,13 @@ function installFrog(model, clips = [], index = 0, options = {}) {
     hasAuthoredHop: false,
     reactive: options.reactive !== false,
     keepGloss: Boolean(options.keepGloss),
+    // Personality for touch reactions: bold frogs stand and call, shy ones jump away.
+    boldness: Math.random(),
+    pokes: 0,
+    puff: 0,
+    // Separate from `cooldown` (the roaming rest), so a resting frog always answers a touch.
+    reactIn: 0,
+    lookYaw: null,
     onSurface: null,
     idleAction: null,
     hopAction: null
@@ -1045,7 +1061,7 @@ window.jungleWall = {
   // Trigger the frog act on demand: 'glass' (belly toward us) or 'wall' (back toward us).
   // Starts as soon as a red-eyed frog is resting (at most a hop away).
   frogLeap(kind = 'glass') {
-    if (surfaceAct.frog) return false;
+    if (surfaceAct.frogs.length) return false;
     surfaceAct.requested = kind === 'wall' ? 'wall' : 'glass';
     return true;
   }
@@ -1469,6 +1485,72 @@ function varyFrogIdle(frog, delta) {
   frog.idleSwapIn = next.getClip().duration < 3 ? next.getClip().duration : THREE.MathUtils.randFloat(4, 10);
 }
 
+// Is the hand (pointer / Kinect) over this frog as it appears on screen? Checked on
+// screen, not on the ground, so touching the frog's body counts.
+const touchScratch = { centre: new THREE.Vector3(), top: new THREE.Vector3() };
+function isHandOnFrog(frog) {
+  const { centre, top } = touchScratch;
+  frog.holder.getWorldPosition(centre);
+  const height = frog.collisionRadius / 0.68; // frogs are sized by height; see installFrog
+  top.copy(centre).addScaledVector(THREE.Object3D.DEFAULT_UP, height);
+  centre.addScaledVector(THREE.Object3D.DEFAULT_UP, height * 0.4).project(camera);
+  top.project(camera);
+  const radius = Math.max(Math.abs(top.y - centre.y) * 1.4, 0.04);
+  return Math.hypot((pointer.x - centre.x) * camera.aspect, pointer.y - centre.y) < radius;
+}
+
+// A touched frog reacts by personality. Poked again while the hand stays, it gives up
+// and jumps away, so no frog can be pestered forever.
+function reactToTouch(frog, index, dx, dz) {
+  const pan = screenPan(frog.holder.getWorldPosition(panScratch));
+  sound?.frogCall(pan, frog.keepGloss);
+  frog.pokes += 1;
+  if (frog.pokes === 1 && frog.keepGloss && !surfaceAct.frogs.length && Math.random() < 0.3) {
+    // Big frogs sometimes leap right at you, onto the glass.
+    if (startSurfaceAct(frog, 'glass')) return;
+  }
+  if (frog.pokes === 1 && frog.boldness > 0.66) {
+    // Stand its ground: puff up twice and call again.
+    frog.puff = 0.9;
+    frog.puffCallAt = 0.45;
+    frog.reactIn = 1.3;
+    frog.cooldown = Math.max(frog.cooldown, 3);
+    return;
+  }
+  if (frog.pokes === 1 && frog.boldness > 0.33) {
+    // Startle: jump straight up and land on the same spot, still facing the hand.
+    const facing = frog.holder.rotation.y;
+    if (startFrogHop(frog, index, frog.holder.position.clone())) {
+      frog.targetYaw = facing;
+      frog.hopHeight *= 1.6;
+      frog.reactIn = 1.2;
+      frog.cooldown = Math.max(frog.cooldown, 3);
+      return;
+    }
+  }
+  // Shy, or poked again: jump away from the hand, trying wider angles and shorter jumps
+  // when the straight escape is blocked (pond, rocks, other frogs, the island's edge).
+  scratchAway.set(dx, 0, dz).normalize();
+  if (scratchAway.lengthSq() < 0.01) scratchAway.set(index % 2 ? 1 : -1, 0, 0.25).normalize();
+  for (const distance of [1.6, 1.1, 0.7]) {
+    for (const angle of [0, Math.PI / 3, -Math.PI / 3, Math.PI / 2, -Math.PI / 2, (2 * Math.PI) / 3, (-2 * Math.PI) / 3]) {
+      const candidate = scratchAway.clone().applyAxisAngle(THREE.Object3D.DEFAULT_UP, angle).multiplyScalar(distance).add(frog.holder.position);
+      if (!startFrogHop(frog, index, candidate)) continue;
+      frog.cooldown = 2.8 + (index % 3) * 0.5;
+      frog.reactIn = 1.5;
+      frog.pokes = 0;
+      return;
+    }
+  }
+  // Boxed in: at least startle on the spot, so a touch is never ignored.
+  const facing = frog.holder.rotation.y;
+  if (startFrogHop(frog, index, frog.holder.position.clone())) {
+    frog.targetYaw = facing;
+    frog.hopHeight *= 1.6;
+  }
+  frog.reactIn = 1.2;
+}
+
 function updateFrogs(time, delta, active) {
   scratchInteraction.copy(interactionPoint);
   habitat.worldToLocal(scratchInteraction);
@@ -1488,16 +1570,14 @@ function updateFrogs(time, delta, active) {
     const dx = pos.x - scratchInteraction.x;
     const dz = pos.z - scratchInteraction.z;
     const distance = Math.hypot(dx, dz);
-    if (frog.reactive && active && distance < 2.4 && frog.cooldown === 0 && frog.hop === 0) {
-      scratchAway.set(dx, 0, dz).normalize();
-      if (scratchAway.lengthSq() < 0.01) scratchAway.set(index % 2 ? 1 : -1, 0, 0.25).normalize();
-      for (const angle of [0, Math.PI / 3, -Math.PI / 3]) {
-        const candidate = scratchAway.clone().applyAxisAngle(THREE.Object3D.DEFAULT_UP, angle)
-          .multiplyScalar(1.6).add(pos);
-        if (!startFrogHop(frog, index, candidate)) continue;
-        frog.cooldown = 2.8 + (index % 3) * 0.5;
-        break;
-      }
+    // A hand nearby: the frog notices and turns to look at it.
+    const aware = frog.reactive && active && distance < 3.4;
+    frog.lookYaw = aware && frog.hop === 0 ? Math.atan2(-dx, -dz) : null;
+    if (!aware) frog.pokes = 0;
+    // The hand actually on the frog (by where it shows on screen): react.
+    frog.reactIn = Math.max(0, frog.reactIn - delta);
+    if (aware && frog.reactIn === 0 && frog.hop === 0 && isHandOnFrog(frog)) {
+      reactToTouch(frog, index, dx, dz);
     }
     if (frog.wander && frog.cooldown === 0 && frog.hop === 0) {
       roamFrog(frog, index);
@@ -1537,6 +1617,23 @@ function updateFrogs(time, delta, active) {
       pos.copy(frog.home);
       frog.holder.rotation.x = Math.sin(time * 0.9 + frog.phase) * 0.012;
       frog.holder.rotation.z = Math.sin(time * 1.15 + frog.phase) * 0.018;
+      if (frog.lookYaw !== null) {
+        // Turn (at most about 150 degrees a second) to look at the hand.
+        const turn = THREE.MathUtils.euclideanModulo(frog.lookYaw - frog.holder.rotation.y + Math.PI, Math.PI * 2) - Math.PI;
+        frog.holder.rotation.y += THREE.MathUtils.clamp(turn, -2.6 * delta, 2.6 * delta);
+      }
+      if (frog.puff > 0) {
+        // Puffing up at the hand: two quick swells, with a second call between them.
+        frog.puff = Math.max(0, frog.puff - delta);
+        const k = 1 - frog.puff / 0.9;
+        const swell = Math.max(0, Math.sin(k * Math.PI * 2)) * 0.14 + Math.max(0, Math.sin(k * Math.PI * 2 - Math.PI)) * 0.14;
+        frog.pose.scale.set(1 + swell, 1 + swell * 0.5, 1 + swell);
+        if (frog.puffCallAt !== null && frog.puff <= frog.puffCallAt) {
+          frog.puffCallAt = null;
+          sound?.frogCall(screenPan(frog.holder.getWorldPosition(panScratch)), frog.keepGloss);
+        }
+        if (frog.puff === 0) frog.pose.scale.set(1, 1, 1);
+      }
       if (frog.breathes) {
         const breath = (0.5 + 0.5 * Math.sin(time * 2.4 + frog.phase)) ** 2 * 0.045;
         frog.pose.scale.set(1 + breath * 0.6, 1 + breath, 1 + breath * 0.35);
@@ -1556,7 +1653,7 @@ const SURFACE = {
   glass: { distance: () => 9, up: new THREE.Vector3(0, 0, -1), reachX: 0.55, minY: -0.35, maxY: 0.45, walkSpeed: 0.34, arc: 1.1 },
   wall: { distance: () => baseDistance * view.zoom + 5, up: new THREE.Vector3(0, 0, 1), reachX: 0.6, minY: 0.05, maxY: 0.62, walkSpeed: 0.9, arc: 2.2 }
 };
-const surfaceAct = { nextAt: 40, frog: null, lastKind: 'wall' };
+const surfaceAct = { nextAt: 40, frogs: [], lastKind: 'wall' };
 const surfaceScratch = { a: new THREE.Vector3(), b: new THREE.Vector3(), q: new THREE.Quaternion(), m: new THREE.Matrix4(), x: new THREE.Vector3(), z: new THREE.Vector3(), ndc: new THREE.Vector3() };
 
 // Camera-space point on a surface (fx, fy are fractions of the visible half-size).
@@ -1592,14 +1689,11 @@ function settleToIdle(frog) {
   frog.hopAction.crossFadeTo(frog.idleAction, 0.3, false);
 }
 
-function pickSurfaceGoal(act) {
-  const cfg = SURFACE[act.kind];
-  act.goal.set(THREE.MathUtils.randFloatSpread(cfg.reachX * 2), THREE.MathUtils.randFloat(cfg.minY, cfg.maxY));
-}
-
-function startSurfaceAct(frog, kind) {
+// options.delay: seconds to wait before starting (so two frogs don't move in step).
+// options.side: -1 left / 1 right half of the screen for the landing spot, or null to
+// land in line with where the frog sits. options.walkLeft: seconds on the surface.
+function startSurfaceAct(frog, kind, options = {}) {
   if (!frog || frog.onSurface || frog.hop > 0) return false;
-  const cfg = SURFACE[kind];
   scene.updateMatrixWorld(true);
   // Which way is the viewer, seen from the frog (in the frog's own ground space)?
   const toViewer = ground.worldToLocal(camera.position.clone()).sub(frog.holder.position).setY(0);
@@ -1607,33 +1701,40 @@ function startSurfaceAct(frog, kind) {
   const startYaw = frog.holder.rotation.y;
   const act = {
     kind,
-    phase: 'turn',
+    phase: options.delay ? 'wait' : 'turn',
     t: 0,
+    delay: options.delay || 0,
+    side: options.side ?? null,
+    band: options.band ?? null, // 'low' / 'high' part of the surface, for pairs
     turnFrom: startYaw,
     turnTo: startYaw + THREE.MathUtils.euclideanModulo(faceYaw - startYaw + Math.PI, Math.PI * 2) - Math.PI,
     spot: new THREE.Vector2(),
-    heading: THREE.MathUtils.randFloatSpread(0.3),
-    goal: new THREE.Vector2(),
-    walkLeft: 7 + Math.random() * 3,
+    heading: options.heading ?? THREE.MathUtils.randFloatSpread(0.25), // kept while on the surface
+    walkLeft: options.walkLeft ?? 7 + Math.random() * 3,
     homeYaw: startYaw
   };
-  pickSurfaceGoal(act);
   frog.onSurface = act;
+  surfaceAct.frogs.push(frog);
   return true;
 }
 
-// End of the turn: lift off. The landing spot on the surface is straight in line with
-// where the frog sits on screen (a little higher), so it flies straight out, not sideways.
+// End of the turn: lift off. The landing spot is in the requested half of the screen, or
+// straight in line with where the frog sits on screen (a little higher), so it flies
+// straight out, not sideways.
 function beginSurfaceLeap(frog, act) {
   const cfg = SURFACE[act.kind];
   scene.updateMatrixWorld(true);
   act.fromPos = frog.holder.getWorldPosition(new THREE.Vector3());
   act.fromQuat = frog.holder.getWorldQuaternion(new THREE.Quaternion());
   const onScreen = act.fromPos.clone().project(camera);
-  act.spot.set(
-    THREE.MathUtils.clamp(onScreen.x, -cfg.reachX, cfg.reachX),
-    THREE.MathUtils.clamp(onScreen.y + 0.2, cfg.minY, cfg.maxY)
-  );
+  const x = act.side === null
+    ? onScreen.x
+    : act.side * THREE.MathUtils.randFloat(cfg.reachX * 0.3, cfg.reachX);
+  const middle = (cfg.minY + cfg.maxY) / 2;
+  const y = act.band === 'low' ? THREE.MathUtils.randFloat(cfg.minY, middle - 0.1)
+    : act.band === 'high' ? THREE.MathUtils.randFloat(middle + 0.05, cfg.maxY)
+      : onScreen.y + THREE.MathUtils.randFloat(0.1, 0.35);
+  act.spot.set(THREE.MathUtils.clamp(x, -cfg.reachX, cfg.reachX), THREE.MathUtils.clamp(y, cfg.minY, cfg.maxY));
   act.phase = 'leap';
   act.t = 0;
   frog.holder.traverse((part) => { if (part.isMesh) part.castShadow = false; });
@@ -1653,26 +1754,65 @@ function surfaceLandingSpot(frog) {
   return frog.home.clone();
 }
 
+// The glass act as a pair: a big frog and a young one land on opposite halves of the
+// screen, one low and one high, leaning different ways, the young one a moment later,
+// and each leaves on its own time, so they never look like copies of each other.
+function startGlassDuo() {
+  const big = frogs.find((frog) => frog.keepGloss && frog.hop === 0 && !frog.onSurface);
+  if (!big) return false;
+  const bigSide = Math.sign(big.holder.getWorldPosition(new THREE.Vector3()).project(camera).x) || 1;
+  const bigLow = Math.random() < 0.5;
+  // Lean each head toward its own outer side of the screen, by different amounts.
+  const lean = () => THREE.MathUtils.randFloat(0.3, 0.75);
+  if (!startSurfaceAct(big, 'glass', { side: bigSide, band: bigLow ? 'low' : 'high', heading: -bigSide * lean(), walkLeft: THREE.MathUtils.randFloat(7, 10) })) return false;
+  const young = frogs
+    .filter((frog) => !frog.keepGloss && frog.hopAction && frog.hop === 0 && !frog.onSurface)
+    .sort(() => Math.random() - 0.5)[0];
+  if (young) {
+    startSurfaceAct(young, 'glass', {
+      side: -bigSide,
+      band: bigLow ? 'high' : 'low',
+      heading: bigSide * lean(),
+      delay: THREE.MathUtils.randFloat(0.5, 1.5),
+      walkLeft: THREE.MathUtils.randFloat(4.5, 7.5)
+    });
+  }
+  return true;
+}
+
 function updateSurfaceFrog(time, delta, active) {
-  // Every 35-60 s a red-eyed frog performs, alternating glass and wall. If both are
-  // mid-hop right then, keep trying each frame until one has landed.
-  if (!surfaceAct.frog && (time > surfaceAct.nextAt || surfaceAct.requested)) {
-    const star = frogs.find((frog) => frog.keepGloss && frog.hop === 0 && !frog.onSurface);
+  // Every 35-60 s: the glass act (a big and a young frog) or the wall act (one big frog),
+  // alternating. If the big frogs are mid-hop right then, keep trying until one lands.
+  if (!surfaceAct.frogs.length && (time > surfaceAct.nextAt || surfaceAct.requested)) {
     const kind = surfaceAct.requested || (surfaceAct.lastKind === 'glass' ? 'wall' : 'glass');
-    if (startSurfaceAct(star, kind)) {
-      surfaceAct.frog = star;
+    const started = kind === 'glass'
+      ? startGlassDuo()
+      : startSurfaceAct(frogs.find((frog) => frog.keepGloss && frog.hop === 0 && !frog.onSurface), 'wall');
+    if (started) {
       surfaceAct.lastKind = kind;
       surfaceAct.requested = null;
       surfaceAct.nextAt = time + 35 + Math.random() * 25;
     }
   }
-  const frog = surfaceAct.frog;
-  const act = frog?.onSurface;
+  for (const frog of surfaceAct.frogs.slice()) updateOneSurfaceFrog(frog, time, delta, active);
+}
+
+function updateOneSurfaceFrog(frog, time, delta, active) {
+  const act = frog.onSurface;
   if (!act) return;
   const holder = frog.holder;
   const cfg = SURFACE[act.kind];
   const { a, b, q, ndc } = surfaceScratch;
   act.t += delta;
+
+  if (act.phase === 'wait') {
+    // Waiting its turn (the second frog of a pair), still sitting on the island.
+    if (act.t >= act.delay) {
+      act.phase = 'turn';
+      act.t = 0;
+    }
+    return;
+  }
 
   if (act.phase === 'turn') {
     // Turn on the spot to face the viewer (or the wall) before jumping.
@@ -1700,6 +1840,7 @@ function updateSurfaceFrog(time, delta, active) {
       sound?.splat(screenPan(holder.position));
       act.t = 0;
       settleToIdle(frog);
+      if (frog.idleAction) frog.idleAction.time = Math.random() * frog.idleAction.getClip().duration;
     }
     return;
   }
@@ -1716,24 +1857,24 @@ function updateSurfaceFrog(time, delta, active) {
         act.t = 0;
       }
     } else {
-      // Creep toward a goal head first, in slow pulses. The hop clip slowed right
-      // down reads as legs pulling the body along.
-      const toGoal = a.set(act.goal.x - act.spot.x, act.goal.y - act.spot.y, 0);
-      if (toGoal.length() < 0.04) pickSurfaceGoal(act);
-      const want = Math.atan2(-toGoal.x, toGoal.y);
-      const turn = THREE.MathUtils.euclideanModulo(want - act.heading + Math.PI, Math.PI * 2) - Math.PI;
-      act.heading += THREE.MathUtils.clamp(turn, -1.6 * delta, 1.6 * delta);
-      const pulse = Math.max(0, Math.sin(time * 3.2));
-      const step = (cfg.walkSpeed * pulse * delta / cfg.distance()) * Math.max(0, Math.cos(turn));
-      act.spot.x = THREE.MathUtils.clamp(act.spot.x - (Math.sin(act.heading) * step) / camera.aspect, -cfg.reachX, cfg.reachX);
-      act.spot.y = THREE.MathUtils.clamp(act.spot.y + Math.cos(act.heading) * step, cfg.minY, cfg.maxY);
+      // Creep straight on, head first, in slow pulses, keeping the direction it landed
+      // in: turning on the spot while stuck to the glass looked fake. At the edge of its
+      // area it simply waits. The hop clip slowed right down reads as legs pulling.
+      // Each frog has its own pulse timing, so a pair never creeps in step.
+      const pulse = Math.max(0, Math.sin(time * 3.2 + frog.phase));
+      const step = cfg.walkSpeed * pulse * delta / cfg.distance();
+      const nextX = act.spot.x - (Math.sin(act.heading) * step) / camera.aspect;
+      const nextY = act.spot.y + Math.cos(act.heading) * step;
+      const blocked = Math.abs(nextX) > cfg.reachX || nextY < cfg.minY || nextY > cfg.maxY;
+      if (!blocked) act.spot.set(nextX, nextY);
       if (frog.hopAction) {
         if (!frog.creeping) {
           frog.creeping = true;
           frog.hopAction.reset().setLoop(THREE.LoopRepeat, Infinity).play();
+          frog.hopAction.time = Math.random() * frog.hopClipDuration; // own leg pose
           if (frog.idleAction) frog.idleAction.crossFadeTo(frog.hopAction, 0.25, false);
         }
-        frog.hopAction.setEffectiveTimeScale(0.12 + pulse * 0.45);
+        frog.hopAction.setEffectiveTimeScale(blocked ? 0.05 : 0.12 + pulse * 0.45);
       }
       act.walkLeft -= delta;
     }
@@ -1774,7 +1915,7 @@ function updateSurfaceFrog(time, delta, active) {
       holder.traverse((part) => { if (part.isMesh) part.castShadow = true; });
       frog.onSurface = null;
       frog.cooldown = 3;
-      surfaceAct.frog = null;
+      surfaceAct.frogs.splice(surfaceAct.frogs.indexOf(frog), 1);
       settleToIdle(frog);
       if (addRipple(holder.getWorldPosition(a), 0.8, 2.6)) sound?.splash(screenPan(a), 1);
     }
@@ -1857,6 +1998,35 @@ function updateSound(time, active) {
   // A quick reply now and then, otherwise a pause.
   soundState.nextCall = time + (Math.random() < 0.3 ? THREE.MathUtils.randFloat(0.3, 0.8) : THREE.MathUtils.randFloat(1.5, 5) * (active ? 2 : 1));
 }
+
+// Scenery toggle: the small leaf button (bottom right) or the H key. ?scenery=off
+// starts with it hidden. The button fades away when the mouse is still, so it never
+// shows on the projector (a Kinect hand doesn't move the mouse).
+let sceneryShown = new URLSearchParams(location.search).get('scenery') !== 'off';
+const sceneryButton = document.querySelector('#scenery-toggle');
+function setSceneryShown(shown) {
+  sceneryShown = shown;
+  scenery.forEach((part) => { part.visible = shown; });
+  if (sceneryButton) {
+    sceneryButton.setAttribute('aria-pressed', String(!shown));
+    const label = shown ? 'Hide island and plants (H)' : 'Show island and plants (H)';
+    sceneryButton.setAttribute('aria-label', label);
+    sceneryButton.title = label;
+  }
+}
+setSceneryShown(sceneryShown);
+sceneryButton?.addEventListener('click', () => setSceneryShown(!sceneryShown));
+window.addEventListener('keydown', (event) => {
+  if (event.key === 'h' || event.key === 'H') setSceneryShown(!sceneryShown);
+});
+let sceneryButtonTimer = 0;
+window.addEventListener('pointermove', (event) => {
+  if (event.pointerType !== 'mouse' || !sceneryButton) return;
+  sceneryButton.classList.add('awake');
+  clearTimeout(sceneryButtonTimer);
+  sceneryButtonTimer = setTimeout(() => sceneryButton.classList.remove('awake'), 3500);
+}, { passive: true });
+window.jungleWall.setScenery = setSceneryShown;
 
 function render() {
   const delta = Math.min(clock.getDelta(), 0.05);
