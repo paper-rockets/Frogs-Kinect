@@ -96,9 +96,17 @@
     const u = unit * h.depth, gy = H * h.lane;
     cx.save();
     if (h.dir < 0) { const mid = h.x + span(h) / 2; cx.translate(mid, 0); cx.scale(-1, 1); cx.translate(-mid, 0); }
-    for (const m of h.members) m.a.draw(cx, h.x + m.dx * u, gy, u);
+    const mid = h.x + span(h) / 2;
+    for (const m of h.members) {
+      // island page: fade out over the island's edge, so animals walk in and out of the dark
+      let a = 1;
+      if (window.Island) { const c = h.x + (m.dx + h.Kind.WIDTH * m.a.size / 2) * u; a = Island.fade(h.dir < 0 ? 2 * mid - c : c, Math.min(gy, H * 0.9), W, H); }
+      if (a <= 0.01) continue;
+      cx.globalAlpha = a; m.a.draw(cx, h.x + m.dx * u, gy, u); cx.globalAlpha = 1;
+    }
     cx.restore();
   }
+  const ground = fn => window.Island ? Island.clip(cx, W, H, fn) : fn();   // island page: ground cut to the island shape
 
   // ?perf=1: time each drawing step into window.PERF (read by tools/perf.mjs)
   const perf = q.has('perf');
@@ -130,9 +138,10 @@
     T('elephants', () => drawHerd(herds[1]));
     T('band2', () => Scenery.band(cx, W, H, clock, 2, night, people));
     T('zebras', () => drawHerd(herds[2]));
-    T('plantsFront', () => Scenery.plants(cx, W, H, clock, 'front', people, night));
+    T('plantsFront', () => ground(() => Scenery.plants(cx, W, H, clock, 'front', people, night)));
     T('nightTint', () => Scenery.nightTint(cx, W, H, night));
-    T('sky', () => Scenery.skyBehind(cx, W, H, clock, night));
+    if (window.Island) T('island', () => Island.finish(cx, W, H, clock, night, Scenery));   // island.html: island on black
+    else T('sky', () => Scenery.skyBehind(cx, W, H, clock, night));
     T('flying', () => Critters.flying(cx, W, H, clock, dt, night, people));
     T('fireflies', () => Scenery.fireflies(cx, W, H, clock, night));
     requestAnimationFrame(frame);

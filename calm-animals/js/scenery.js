@@ -107,7 +107,8 @@
     cx.globalAlpha = alpha; cx.drawImage(sized(src, w, h, cx), x - w / 2, y - h / 2, w, h); cx.globalAlpha = 1;
   }
 
-  function hills(cx, W, H, n) {
+  function hills(cx, W, H, n, baked) {
+    if (window.Island && !baked) return;               // island page: hills are baked into band 0, cut to the island
     const h = H * 0.20, y = BANDS[0].top * H - h + H * 0.012;
     for (const [src, a] of [[P + 'hills_day/piece_0', 1 - n], [P + 'hills_night/piece_0', n]]) {
       if (a <= 0.01) continue;
@@ -128,7 +129,9 @@
       const c = bc ? bc.c : document.createElement('canvas');
       c.width = Math.round(W * dpr); c.height = Math.round(H * dpr);
       const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      if (window.Island && k === 0) hills(g, W, H, nq, true);
       bandShape(g, W, H, k, nq);
+      if (window.Island) Island.cut(g, W, H);            // island page: cut once here, not every frame
       bc = bandCache[k] = { c, key };
     }
     cx.drawImage(bc.c, 0, 0, W, H);
@@ -177,6 +180,7 @@
     for (const g of tufts) {
       if (g.band !== k) continue;
       const x = g.x * W, y = edge(k, x, W, H) + 3, i = img[g.g], h = S * g.h, w = h * i.width / i.height;
+      if (window.Island && Island.fade(x, y, W, H) < 0.7) continue;   // island page: no grass out on the black
       cx.save(); cx.translate(x, y); cx.rotate(lean(t, x, W, people, 0.05, g.ph)); if (g.flip) cx.scale(-1, 1);
       cx.drawImage(sized(g.g, w, h, cx), -w / 2, -h, w, h); cx.restore();
     }
@@ -190,12 +194,15 @@
     return Math.sin(t * 0.9 + ph + x * 0.01) * a + Math.sin(t * 2.1 + ph) * a * 0.3;
   }
 
+  // plant x as a share of W; on the island page plants move inward so they stand on the island
+  const plantX = p => window.Island ? 0.5 + (p.x - 0.5) * Island.SQUEEZE : p.x;
+
   // n = night amount: plants with a night picture (nf, sheet6) fade from the day picture to it
   function plants(cx, W, H, t, layer, people, n = 0) {
     const S = Math.min(H, W * 0.62);
     for (const p of PLANTS) {
       if (p.layer !== layer) continue;
-      const h = S * p.h, x = W * p.x;
+      const h = S * p.h, x = W * plantX(p);
       const y = p.band !== undefined ? edge(p.band, x, W, H) + H * p.off : H * p.base;
       cx.save(); cx.translate(x, y); cx.rotate(p.sway ? lean(t, x, W, people, p.sway, p.x * 17) : 0);
       for (const [f, a] of p.nf ? [[p.f, 1 - n], [p.nf, n]] : [[p.f, 1]]) {
@@ -224,6 +231,18 @@
     const g = cx.createLinearGradient(0, 0, 0, H * BANDS[0].top + 4);
     day.forEach((d, k) => g.addColorStop(k / 2, mix(d, night[k], n)));
     cx.fillStyle = g; cx.fillRect(0, 0, W, H);
+    cx.globalCompositeOperation = 'source-over';
+  }
+
+  // island page: only a small sun or moon and stars over black, drawn behind the island (no sky colour, no clouds)
+  function smallSky(cx, W, H, t, n) {
+    const S = Math.min(H, W * 0.62);
+    cx.globalCompositeOperation = 'destination-over';
+    if (n > 0.01) {
+      put(cx, MOON, W * 0.2, H * 0.13, S * 0.12, n);
+      for (const s of stars) put(cx, s.s, W * s.x, H * s.y * 0.8, S * s.h, n * (0.75 + 0.25 * Math.sin(t * 0.8 + s.ph)));
+    }
+    if (1 - n > 0.01) put(cx, SUN, W * 0.8, H * 0.12, S * 0.1, 1 - n);
     cx.globalCompositeOperation = 'source-over';
   }
 
@@ -259,9 +278,9 @@
   // where the waterhole is on screen: centre of the water and its drawn size
   function pond(W, H) {
     const p = PLANTS.find(q => q.pond), i = img[p.f], S = Math.min(H, W * 0.62), h = S * p.h, w = h * i.width / i.height;
-    const x = W * p.x, y = edge(p.band, x, W, H) + H * p.off;
+    const x = W * plantX(p), y = edge(p.band, x, W, H) + H * p.off;
     return { x, y: y - h / 2, w, h };
   }
 
-  window.Scenery = { setup, hills, band, plants, skyBehind, nightTint, fireflies, edge, pond };
+  window.Scenery = { setup, hills, band, plants, skyBehind, smallSky, nightTint, fireflies, edge, pond };
 })();
