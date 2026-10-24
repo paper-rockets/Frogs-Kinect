@@ -1,18 +1,32 @@
 // Painted animals from the owner's sheets that stay in one place or drift: a resting lion and cub,
-// flamingos wading in the waterhole, birds crossing the sky and butterflies over the grass (day only).
+// a sitting lion, baby elephant and baby giraffe, flamingos wading in the waterhole, antelopes and a monkey
+// crossing now and then, birds crossing the sky and butterflies over the grass (day only).
 // All calm: breathing, bobbing, slow flaps. Butterflies drift away from a person; the lion looks up a little.
 (function () {
   const P = 'parts/', N1 = P + 'new1/piece_', N3 = P + 'new3/piece_', N5 = P + 'new5/piece_';
   const LION = N1 + 8, CUB = N5 + 6, RIPPLE = N1 + 40;
   const FLAMINGOS = [{ f: N1 + 5, dx: -0.30, h: 0.115, ph: 0 }, { f: N1 + 6, dx: 0.02, h: 0.105, ph: 2.1 }, { f: N1 + 7, dx: 0.26, h: 0.085, ph: 4.0 }];
   const BIRDS = [N3 + 8, N3 + 9], FLIES = [N3 + 10, N3 + 11, N3 + 12];
+  // more resting animals on the middle ground: sitting lion by the rock, sleeping baby elephant by the bush, lying baby giraffe
+  const REST = [
+    { f: N5 + 3, x: 0.41, h: 0.13, br: 0.9, ph: 0.5 },
+    { f: N5 + 2, x: 0.535, h: 0.075, br: 1.3, ph: 2.0 },
+    { f: N5 + 10, x: 0.615, h: 0.11, br: 1.0, ph: 3.3 }
+  ];
+  // now and then a pair of antelopes bounds across the back and a monkey walks across the middle (left to right)
+  const CROSS = [
+    { layer: 'far', band: 0, off: 0.05, h: 0.08, v: 0.03, wait: 8, hop: true, members: [{ f: N3 + 5, dx: 0, ph: 0 }, { f: N3 + 6, dx: -0.07, ph: 0.45 }] },
+    { layer: 'mid', y: 0.888, h: 0.07, v: 0.022, wait: 25, hop: false, members: [{ f: N3 + 7, dx: 0, ph: 0 }] }
+  ];
   const img = {};
   let birds = [], flies = [];
+  const crossStart = new URLSearchParams(location.search).get('cross');   // for checks: crossers start at this x (share of W)
 
   function load(src) { return new Promise(r => { const i = new Image(); i.onload = () => { img[src] = i; r(); }; i.src = src + '.png'; }); }
 
   async function setup() {
-    await Promise.all([LION, CUB, RIPPLE].concat(FLAMINGOS.map(f => f.f), BIRDS, FLIES).map(load));
+    await Promise.all([LION, CUB, RIPPLE].concat(FLAMINGOS.map(f => f.f), BIRDS, FLIES, REST.map(r => r.f), CROSS.flatMap(c => c.members.map(m => m.f))).map(load));
+    for (const c of CROSS) Object.assign(c, { x: crossStart !== null ? +crossStart : null, speed: 1, p: 0 });
     birds = BIRDS.map((f, k) => ({ f, x: 0.2 + k * 0.5, y: 0.18 + k * 0.1, v: 0.012 + k * 0.004, ph: k * 2 }));
     flies = Array.from({ length: 5 }, (_, k) => ({ f: FLIES[k % 3], x: 0.15 + k * 0.18, y: 0.72 + (k % 2) * 0.1, vx: 0, vy: 0, ph: k * 1.7 }));
   }
@@ -38,6 +52,12 @@
     const cy = Scenery.edge(1, W * 0.235, W, H) + H * 0.04;
     const cb = Math.sin(t * 1.6 + 1) * 0.015;
     stand(cx, CUB, W * 0.235, cy, S * 0.07, 1 - cb * 0.4, 1 + cb);
+    for (const r of REST) {
+      // island page: move inward like the plants
+      const x = W * (window.Island ? 0.5 + (r.x - 0.5) * Island.SQUEEZE : r.x), y = Scenery.edge(1, x, W, H) + H * 0.035;
+      const nr = nearOf(people, x, W, 0.15), b = Math.sin(t * r.br * (1 - 0.3 * nr) + r.ph) * 0.012;
+      stand(cx, r.f, x, y, S * r.h, 1 - b * 0.4, 1 + b, -nr * 0.03);
+    }
 
     const pond = Scenery.pond(W, H);
     for (const f of FLAMINGOS) {
@@ -48,6 +68,30 @@
       cx.drawImage(ri, x - rw / 2, y - rw * ri.height / ri.width / 2, rw, rw * ri.height / ri.width); cx.restore();
       const sway = Math.sin(t * 0.7 + f.ph) * 0.025, bob = 1 + Math.sin(t * 1.3 + f.ph) * 0.01;
       stand(cx, f.f, x, y, h, 1, bob, sway);
+    }
+  }
+
+  // antelopes (layer 'far', drawn in front of the far trees) or monkey (layer 'mid', in front of the elephants)
+  function crossing(cx, W, H, dt, people, layer) {
+    const S = Math.min(H, W * 0.62);
+    for (const c of CROSS) {
+      if (c.layer !== layer) continue;
+      if (c.x === null) { if ((c.wait -= dt) <= 0) { c.x = -0.08; c.speed = 1; } else continue; }
+      // slow down near a person, like the herds
+      const near = nearOf(people, W * c.x, W, 0.15);
+      c.speed += ((1 - 0.85 * near) - c.speed) * Math.min(1, dt * 2.5);
+      c.x += c.v * c.speed * dt; c.p += dt * c.speed * (c.hop ? 0.8 : 0.9);
+      if (c.x + Math.min(...c.members.map(m => m.dx)) > 1.08) { c.x = null; c.wait = 45 + Math.random() * 40; continue; }
+      const h = S * c.h;
+      for (const m of c.members) {
+        const x = W * (c.x + m.dx), ph = Math.PI * (c.p + m.ph);
+        let y = c.band !== undefined ? Scenery.edge(c.band, x, W, H) + H * c.off : H * c.y, rot;
+        // antelopes: soft low arcs, nose up going up, down coming down; monkey: small bob each step
+        if (c.hop) { y -= Math.abs(Math.sin(ph)) * h * 0.35; rot = -0.12 * Math.sin(2 * ph); }
+        else { y -= Math.abs(Math.sin(ph)) * h * 0.04; rot = Math.sin(ph) * 0.03; }
+        const a = window.Island ? Island.fade(x, Math.min(y, H * 0.9), W, H) : 1;
+        if (a > 0.01) stand(cx, m.f, x, y, h, 1, 1, rot, a);
+      }
     }
   }
 
@@ -73,5 +117,5 @@
     }
   }
 
-  window.Critters = { setup, resting, flying };
+  window.Critters = { setup, resting, crossing, flying };
 })();

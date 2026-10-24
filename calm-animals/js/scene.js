@@ -131,11 +131,13 @@
     T('hills', () => Scenery.hills(cx, W, H, night));
     T('band0', () => Scenery.band(cx, W, H, clock, 0, night, people));
     T('plantsFar', () => Scenery.plants(cx, W, H, clock, 'far', people, night));
+    T('antelopes', () => Critters.crossing(cx, W, H, dt, people, 'far'));
     T('band1', () => Scenery.band(cx, W, H, clock, 1, night, people));
     T('plantsMid', () => Scenery.plants(cx, W, H, clock, 'mid', people, night));
     T('resting', () => Critters.resting(cx, W, H, clock, people));
     T('giraffes', () => drawHerd(herds[0]));
     T('elephants', () => drawHerd(herds[1]));
+    T('monkey', () => Critters.crossing(cx, W, H, dt, people, 'mid'));
     T('band2', () => Scenery.band(cx, W, H, clock, 2, night, people));
     T('zebras', () => drawHerd(herds[2]));
     T('plantsFront', () => ground(() => Scenery.plants(cx, W, H, clock, 'front', people, night)));
